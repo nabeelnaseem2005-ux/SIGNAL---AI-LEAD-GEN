@@ -29,15 +29,6 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 load_dotenv()
 
-
-def database_url_from_environment() -> str:
-    value = os.getenv("DATABASE_URL", "sqlite:///ai_lead_gen.sqlite3").strip()
-    if value.startswith("/"):
-        return f"sqlite:///{value}"
-    if value.startswith("postgres://"):
-        return value.replace("postgres://", "postgresql://", 1)
-    return value
-
 db = SQLAlchemy()
 migrate = Migrate()
 login_manager = LoginManager()
@@ -47,7 +38,10 @@ login_manager.login_view = "auth.login"
 
 class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "change-this-in-production")
-    SQLALCHEMY_DATABASE_URI = database_url_from_environment()
+    SQLALCHEMY_DATABASE_URI = os.getenv(
+        "DATABASE_URL",
+        "sqlite:///ai_lead_gen.sqlite3",
+    )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
     SCRAPER_TIMEOUT = 4.0
@@ -60,10 +54,6 @@ class Config:
     MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
     MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
     MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", os.getenv("MAIL_USERNAME", ""))
-    MAIL_TIMEOUT = float(os.getenv("MAIL_TIMEOUT", "10"))
-    RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-    RESEND_API_URL = os.getenv("RESEND_API_URL", "https://api.resend.com/emails")
-    RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "")
     PASSWORD_RESET_TOKEN_MAX_AGE = 60 * 60
     MAX_CONTENT_LENGTH = 2 * 1024 * 1024
 
@@ -738,49 +728,6 @@ def _set_cached_search(cache_key: str, results: list[dict]) -> None:
         _search_cache[cache_key] = (time.time(), copy.deepcopy(results))
 
 
-def _send_mail_with_timeout(message: Message) -> None:
-    """Send mail through Resend when configured, otherwise use SMTP with a timeout."""
-    timeout = current_app.config.get("MAIL_TIMEOUT", 10)
-    resend_key = current_app.config.get("RESEND_API_KEY")
-    if resend_key:
-        sender = current_app.config.get("RESEND_FROM_EMAIL") or current_app.config.get("MAIL_DEFAULT_SENDER")
-        response = requests.post(
-            current_app.config.get("RESEND_API_URL", "https://api.resend.com/emails"),
-            headers={"Authorization": f"Bearer {resend_key}"},
-            json={
-                "from": sender,
-                "to": message.recipients,
-                "subject": message.subject,
-                "text": message.body,
-            },
-            timeout=timeout,
-        )
-        if response.status_code >= 400:
-            raise RuntimeError(f"Resend returned HTTP {response.status_code}: {response.text[:500]}")
-        return
-    sender = current_app.config.get("MAIL_DEFAULT_SENDER")
-    if current_app.config.get("MAIL_USE_SSL"):
-        connection = smtplib.SMTP_SSL(
-            current_app.config["MAIL_SERVER"],
-            current_app.config["MAIL_PORT"],
-            timeout=timeout,
-        )
-    else:
-        connection = smtplib.SMTP(
-            current_app.config["MAIL_SERVER"],
-            current_app.config["MAIL_PORT"],
-            timeout=timeout,
-        )
-    with connection:
-        if current_app.config.get("MAIL_USE_TLS"):
-            connection.starttls()
-        username = current_app.config.get("MAIL_USERNAME")
-        password = current_app.config.get("MAIL_PASSWORD")
-        if username:
-            connection.login(username, password)
-        connection.sendmail(sender, message.recipients, message.as_string())
-
-
 @landing_bp.get("/")
 def landing():
     if current_user.is_authenticated:
@@ -828,21 +775,13 @@ def login():
 def forgot_password():
     if request.method == "POST":
         email = request.form.get("email", "").strip().lower()
-        try:
-            user = db.session.scalar(db.select(User).where(User.email == email))
-        except Exception:
-            db.session.rollback()
-            current_app.logger.exception("Password reset database lookup failed")
-            return render_template(
-                "auth/forgot_password.html",
-                error="Password reset is temporarily unavailable. Please try again shortly.",
-            ), 503
+        user = db.session.scalar(db.select(User).where(User.email == email))
         if user:
             serializer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
             token = serializer.dumps({"user_id": user.id}, salt="password-reset")
             reset_url = url_for("auth.reset_password", token=token, _external=True)
             try:
-                _send_mail_with_timeout(
+                mail.send(
                     Message(
                         subject="Reset your Signal password",
                         recipients=[user.email],
@@ -855,10 +794,6 @@ def forgot_password():
                 )
             except Exception:
                 current_app.logger.exception("Password reset email delivery failed")
-                return render_template(
-                    "auth/forgot_password.html",
-                    error="We could not send the reset email. Check the mail settings and try again.",
-                ), 503
         return render_template(
             "auth/forgot_password.html",
             sent=True,
@@ -971,7 +906,7 @@ def send_lead_email(lead_id: int):
     subject = payload.get("subject") or lead.pitch_subject or f"Quick {service_label(lead.service_type).lower()} note regarding {lead.business_name}"
     body = payload.get("body") or getattr(lead, f"outreach_step_{step}")
     try:
-        _send_mail_with_timeout(Message(subject=subject, recipients=[recipient], body=body))
+        mail.send(Message(subject=subject, recipients=[recipient], body=body))
     except Exception as exc:
         current_app.logger.exception("Email delivery failed for lead %s", lead_id)
         return jsonify({"error": f"Email delivery failed: {exc}"}), 502
