@@ -6,6 +6,7 @@ import os
 import re
 import smtplib
 import time
+import traceback
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
@@ -54,7 +55,11 @@ class Config:
     MAIL_USE_SSL = os.getenv("MAIL_USE_SSL", "false").lower() == "true"
     MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
     MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
-    MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", os.getenv("MAIL_USERNAME", ""))
+    # Gmail rejects (or silently drops) messages where the "From" address does
+    # not match the authenticated account, so MAIL_DEFAULT_SENDER is always
+    # forced to match MAIL_USERNAME regardless of what MAIL_DEFAULT_SENDER is
+    # set to in the environment.
+    MAIL_DEFAULT_SENDER = MAIL_USERNAME
     PASSWORD_RESET_TOKEN_MAX_AGE = 60 * 60
     MAX_CONTENT_LENGTH = 2 * 1024 * 1024
 
@@ -725,11 +730,56 @@ def _mail_worker(app) -> None:
         try:
             if message is None:
                 return
+            recipients = getattr(message, "recipients", None)
+            sender = getattr(message, "sender", None)
+            subject = getattr(message, "subject", None)
             try:
                 with app.app_context():
+                    configured_sender = current_app.config.get("MAIL_DEFAULT_SENDER")
+                    configured_username = current_app.config.get("MAIL_USERNAME")
+                    app.logger.info(
+                        "Sending email | to=%s | sender=%s | configured_default_sender=%s | "
+                        "configured_username=%s | subject=%s",
+                        recipients,
+                        sender or configured_sender,
+                        configured_sender,
+                        configured_username,
+                        subject,
+                    )
                     mail.send(message)
-            except Exception:
-                app.logger.exception("Async email delivery failed for %s", getattr(message, "recipients", None))
+                    app.logger.info(
+                        "Email sent successfully | to=%s | sender=%s | subject=%s",
+                        recipients,
+                        sender or configured_sender,
+                        subject,
+                    )
+            except smtplib.SMTPAuthenticationError as exc:
+                app.logger.error(
+                    "SMTP authentication failed while sending to %s from %s (subject=%s): %s\n%s",
+                    recipients,
+                    sender,
+                    subject,
+                    exc,
+                    traceback.format_exc(),
+                )
+            except smtplib.SMTPException as exc:
+                app.logger.error(
+                    "SMTP error while sending to %s from %s (subject=%s): %s\n%s",
+                    recipients,
+                    sender,
+                    subject,
+                    exc,
+                    traceback.format_exc(),
+                )
+            except Exception as exc:
+                app.logger.error(
+                    "Async email delivery failed for %s from %s (subject=%s): %s\n%s",
+                    recipients,
+                    sender,
+                    subject,
+                    exc,
+                    traceback.format_exc(),
+                )
         finally:
             _mail_queue.task_done()
 
