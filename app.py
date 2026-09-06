@@ -735,6 +735,32 @@ def _set_cached_search(cache_key: str, results: list[dict]) -> None:
         _search_cache[cache_key] = (time.time(), copy.deepcopy(results))
 
 
+def _send_mail_with_timeout(message: Message) -> None:
+    """Send SMTP mail with an explicit network timeout for hosted environments."""
+    timeout = current_app.config.get("MAIL_TIMEOUT", 10)
+    sender = current_app.config.get("MAIL_DEFAULT_SENDER")
+    if current_app.config.get("MAIL_USE_SSL"):
+        connection = smtplib.SMTP_SSL(
+            current_app.config["MAIL_SERVER"],
+            current_app.config["MAIL_PORT"],
+            timeout=timeout,
+        )
+    else:
+        connection = smtplib.SMTP(
+            current_app.config["MAIL_SERVER"],
+            current_app.config["MAIL_PORT"],
+            timeout=timeout,
+        )
+    with connection:
+        if current_app.config.get("MAIL_USE_TLS"):
+            connection.starttls()
+        username = current_app.config.get("MAIL_USERNAME")
+        password = current_app.config.get("MAIL_PASSWORD")
+        if username:
+            connection.login(username, password)
+        connection.sendmail(sender, message.recipients, message.as_string())
+
+
 @landing_bp.get("/")
 def landing():
     if current_user.is_authenticated:
@@ -796,7 +822,7 @@ def forgot_password():
             token = serializer.dumps({"user_id": user.id}, salt="password-reset")
             reset_url = url_for("auth.reset_password", token=token, _external=True)
             try:
-                mail.send(
+                _send_mail_with_timeout(
                     Message(
                         subject="Reset your Signal password",
                         recipients=[user.email],
@@ -925,7 +951,7 @@ def send_lead_email(lead_id: int):
     subject = payload.get("subject") or lead.pitch_subject or f"Quick {service_label(lead.service_type).lower()} note regarding {lead.business_name}"
     body = payload.get("body") or getattr(lead, f"outreach_step_{step}")
     try:
-        mail.send(Message(subject=subject, recipients=[recipient], body=body))
+        _send_mail_with_timeout(Message(subject=subject, recipients=[recipient], body=body))
     except Exception as exc:
         current_app.logger.exception("Email delivery failed for lead %s", lead_id)
         return jsonify({"error": f"Email delivery failed: {exc}"}), 502
