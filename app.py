@@ -24,6 +24,7 @@ from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
 from serpapi import GoogleSearch
 from sqlalchemy import inspect, or_
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash, generate_password_hash
 
 load_dotenv()
@@ -53,6 +54,7 @@ class Config:
     MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
     MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
     MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", os.getenv("MAIL_USERNAME", ""))
+    PASSWORD_RESET_TOKEN_MAX_AGE = 60 * 60
     MAX_CONTENT_LENGTH = 2 * 1024 * 1024
 
 
@@ -766,7 +768,73 @@ def login():
             return render_template("auth/login.html", error="Email or password is incorrect."), 401
         login_user(user)
         return redirect(url_for("prospector.index"))
-    return render_template("auth/login.html")
+    return render_template("auth/login.html", reset_success=request.args.get("reset") == "success")
+
+
+@auth_bp.route("/forgot-password", methods=["GET", "POST"])
+def forgot_password():
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        user = db.session.scalar(db.select(User).where(User.email == email))
+        if user:
+            serializer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
+            token = serializer.dumps({"user_id": user.id}, salt="password-reset")
+            reset_url = url_for("auth.reset_password", token=token, _external=True)
+            try:
+                mail.send(
+                    Message(
+                        subject="Reset your Signal password",
+                        recipients=[user.email],
+                        body=(
+                            "We received a request to reset your Signal password.\n\n"
+                            f"Reset it here: {reset_url}\n\n"
+                            "This link expires in one hour. If you did not request this, you can ignore this email."
+                        ),
+                    )
+                )
+            except Exception:
+                current_app.logger.exception("Password reset email delivery failed")
+        return render_template(
+            "auth/forgot_password.html",
+            sent=True,
+        )
+    return render_template("auth/forgot_password.html")
+
+
+@auth_bp.route("/reset-password/<token>", methods=["GET", "POST"])
+def reset_password(token: str):
+    serializer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
+    try:
+        payload = serializer.loads(
+            token,
+            salt="password-reset",
+            max_age=current_app.config.get("PASSWORD_RESET_TOKEN_MAX_AGE", 60 * 60),
+        )
+    except (BadSignature, SignatureExpired):
+        return render_template(
+            "auth/reset_password.html",
+            error="This reset link is invalid or expired. Request a new one.",
+            invalid_token=True,
+        ), 400
+
+    user = db.session.get(User, payload.get("user_id"))
+    if user is None:
+        return render_template(
+            "auth/reset_password.html",
+            error="This reset link is invalid or expired. Request a new one.",
+            invalid_token=True,
+        ), 400
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        if len(password) < 8:
+            return render_template(
+                "auth/reset_password.html",
+                error="Password must be at least 8 characters.",
+            ), 400
+        user.set_password(password)
+        db.session.commit()
+        return redirect(url_for("auth.login", reset="success"))
+    return render_template("auth/reset_password.html")
 
 
 @auth_bp.post("/logout")
