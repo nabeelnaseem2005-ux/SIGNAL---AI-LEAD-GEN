@@ -29,6 +29,15 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 load_dotenv()
 
+
+def database_url_from_environment() -> str:
+    value = os.getenv("DATABASE_URL", "sqlite:///ai_lead_gen.sqlite3").strip()
+    if value.startswith("/"):
+        return f"sqlite:///{value}"
+    if value.startswith("postgres://"):
+        return value.replace("postgres://", "postgresql://", 1)
+    return value
+
 db = SQLAlchemy()
 migrate = Migrate()
 login_manager = LoginManager()
@@ -38,10 +47,7 @@ login_manager.login_view = "auth.login"
 
 class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "change-this-in-production")
-    SQLALCHEMY_DATABASE_URI = os.getenv(
-        "DATABASE_URL",
-        "sqlite:///ai_lead_gen.sqlite3",
-    )
+    SQLALCHEMY_DATABASE_URI = database_url_from_environment()
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
     SCRAPER_TIMEOUT = 4.0
@@ -54,6 +60,7 @@ class Config:
     MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
     MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
     MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", os.getenv("MAIL_USERNAME", ""))
+    MAIL_TIMEOUT = float(os.getenv("MAIL_TIMEOUT", "10"))
     PASSWORD_RESET_TOKEN_MAX_AGE = 60 * 60
     MAX_CONTENT_LENGTH = 2 * 1024 * 1024
 
@@ -775,7 +782,15 @@ def login():
 def forgot_password():
     if request.method == "POST":
         email = request.form.get("email", "").strip().lower()
-        user = db.session.scalar(db.select(User).where(User.email == email))
+        try:
+            user = db.session.scalar(db.select(User).where(User.email == email))
+        except Exception:
+            db.session.rollback()
+            current_app.logger.exception("Password reset database lookup failed")
+            return render_template(
+                "auth/forgot_password.html",
+                error="Password reset is temporarily unavailable. Please try again shortly.",
+            ), 503
         if user:
             serializer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
             token = serializer.dumps({"user_id": user.id}, salt="password-reset")
@@ -794,6 +809,10 @@ def forgot_password():
                 )
             except Exception:
                 current_app.logger.exception("Password reset email delivery failed")
+                return render_template(
+                    "auth/forgot_password.html",
+                    error="We could not send the reset email. Check the mail settings and try again.",
+                ), 503
         return render_template(
             "auth/forgot_password.html",
             sent=True,
