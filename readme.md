@@ -461,6 +461,12 @@ The local database file is ignored by Git.
 
 For a production deployment with multiple workers, replace the in-process SQLite and thread-based task registry with a managed database and durable worker system such as PostgreSQL plus Celery or RQ.
 
+### Live Hosting Database
+
+Do not use the local SQLite `DATABASE_URL` on a live host unless the service has a persistent disk mounted at the database location. A redeploy or container restart can otherwise discard users and password changes, making a successful password reset appear not to work during the next login.
+
+Set the hosting provider's `DATABASE_URL` to a persistent managed PostgreSQL database, or attach a persistent disk for SQLite. Confirm that the reset request and login request reach the same database. The `SECRET_KEY` must also remain unchanged between deploys so password-reset links remain valid for their one-hour lifetime.
+
 ## Duplicate Prevention
 
 Repeated searches do not insert the same business repeatedly. Leads are normalized by business name and website before saving.

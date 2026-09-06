@@ -833,6 +833,7 @@ def reset_password(token: str):
             ), 400
         user.set_password(password)
         db.session.commit()
+        logout_user()
         return redirect(url_for("auth.login", reset="success"))
     return render_template("auth/reset_password.html")
 
