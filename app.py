@@ -61,6 +61,8 @@ class Config:
     MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
     MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", os.getenv("MAIL_USERNAME", ""))
     MAIL_TIMEOUT = float(os.getenv("MAIL_TIMEOUT", "10"))
+    RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+    RESEND_API_URL = os.getenv("RESEND_API_URL", "https://api.resend.com/emails")
     PASSWORD_RESET_TOKEN_MAX_AGE = 60 * 60
     MAX_CONTENT_LENGTH = 2 * 1024 * 1024
 
@@ -736,9 +738,25 @@ def _set_cached_search(cache_key: str, results: list[dict]) -> None:
 
 
 def _send_mail_with_timeout(message: Message) -> None:
-    """Send SMTP mail with an explicit network timeout for hosted environments."""
+    """Send mail through Resend when configured, otherwise use SMTP with a timeout."""
     timeout = current_app.config.get("MAIL_TIMEOUT", 10)
     sender = current_app.config.get("MAIL_DEFAULT_SENDER")
+    resend_key = current_app.config.get("RESEND_API_KEY")
+    if resend_key:
+        response = requests.post(
+            current_app.config.get("RESEND_API_URL", "https://api.resend.com/emails"),
+            headers={"Authorization": f"Bearer {resend_key}"},
+            json={
+                "from": sender,
+                "to": message.recipients,
+                "subject": message.subject,
+                "text": message.body,
+            },
+            timeout=timeout,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"Resend returned HTTP {response.status_code}: {response.text[:500]}")
+        return
     if current_app.config.get("MAIL_USE_SSL"):
         connection = smtplib.SMTP_SSL(
             current_app.config["MAIL_SERVER"],
