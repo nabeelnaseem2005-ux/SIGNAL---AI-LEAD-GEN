@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
+from queue import Queue
 from threading import Lock, Thread
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -710,6 +711,42 @@ _search_cache: dict[str, tuple[float, list[dict]]] = {}
 _search_cache_lock = Lock()
 _ALLOWED_STATUSES = {"New", "Contacted", "Closed"}
 
+# Background mail queue: emails are enqueued here and delivered by a
+# long-running worker thread so request handlers never block on SMTP I/O
+# (Gmail's SMTP handshake can hang well past gunicorn's worker timeout).
+_mail_queue: "Queue[Message | None]" = Queue()
+_mail_worker_thread: Thread | None = None
+_mail_worker_lock = Lock()
+
+
+def _mail_worker(app) -> None:
+    while True:
+        message = _mail_queue.get()
+        try:
+            if message is None:
+                return
+            try:
+                with app.app_context():
+                    mail.send(message)
+            except Exception:
+                app.logger.exception("Async email delivery failed for %s", getattr(message, "recipients", None))
+        finally:
+            _mail_queue.task_done()
+
+
+def start_mail_worker(app) -> None:
+    """Start the singleton background thread that drains the mail queue."""
+    global _mail_worker_thread
+    with _mail_worker_lock:
+        if _mail_worker_thread is None or not _mail_worker_thread.is_alive():
+            _mail_worker_thread = Thread(target=_mail_worker, args=(app,), daemon=True, name="mail-worker")
+            _mail_worker_thread.start()
+
+
+def send_email_async(message: Message) -> None:
+    """Queue an email for delivery on the background mail worker thread."""
+    _mail_queue.put(message)
+
 
 def _get_cached_search(cache_key: str) -> list[dict] | None:
     with _search_cache_lock:
@@ -781,7 +818,7 @@ def forgot_password():
             token = serializer.dumps({"user_id": user.id}, salt="password-reset")
             reset_url = url_for("auth.reset_password", token=token, _external=True)
             try:
-                mail.send(
+                send_email_async(
                     Message(
                         subject="Reset your Signal password",
                         recipients=[user.email],
@@ -793,7 +830,7 @@ def forgot_password():
                     )
                 )
             except Exception:
-                current_app.logger.exception("Password reset email delivery failed")
+                current_app.logger.exception("Password reset email could not be queued")
         return render_template(
             "auth/forgot_password.html",
             sent=True,
@@ -906,16 +943,16 @@ def send_lead_email(lead_id: int):
     subject = payload.get("subject") or lead.pitch_subject or f"Quick {service_label(lead.service_type).lower()} note regarding {lead.business_name}"
     body = payload.get("body") or getattr(lead, f"outreach_step_{step}")
     try:
-        mail.send(Message(subject=subject, recipients=[recipient], body=body))
+        send_email_async(Message(subject=subject, recipients=[recipient], body=body))
     except Exception as exc:
-        current_app.logger.exception("Email delivery failed for lead %s", lead_id)
-        return jsonify({"error": f"Email delivery failed: {exc}"}), 502
+        current_app.logger.exception("Email could not be queued for lead %s", lead_id)
+        return jsonify({"error": f"Email could not be queued: {exc}"}), 502
     lead.outreach_step_sent = max(lead.outreach_step_sent or 0, step)
     lead.last_email_sent_at = datetime.now(timezone.utc)
     if step == 1:
         lead.lead_status = "Contacted"
     db.session.commit()
-    return jsonify({"status": "sent", "step": step, "recipient": recipient})
+    return jsonify({"status": "queued", "step": step, "recipient": recipient})
 
 
 def _run_search(app, task_id: str, query: str, user_id: int | None) -> None:
@@ -1151,6 +1188,8 @@ def create_app(config_class=None) -> Flask:
         db.create_all()
         _ensure_legacy_columns()
         _refresh_legacy_outreach()
+
+    start_mail_worker(app)
 
     @app.after_request
     def compress_response(response):
