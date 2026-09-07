@@ -36,6 +36,13 @@ mail = Mail()
 login_manager.login_view = "auth.login"
 
 
+@login_manager.unauthorized_handler
+def unauthorized():
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Your session has expired. Please log in again."}), 401
+    return redirect(url_for(login_manager.login_view))
+
+
 class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "change-this-in-production")
     SQLALCHEMY_DATABASE_URI = os.getenv(
