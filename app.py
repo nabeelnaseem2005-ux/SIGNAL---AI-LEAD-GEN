@@ -775,12 +775,27 @@ def login():
 def forgot_password():
     if request.method == "POST":
         email = request.form.get("email", "").strip().lower()
-        user = db.session.scalar(db.select(User).where(User.email == email))
-        if user:
-            serializer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
-            token = serializer.dumps({"user_id": user.id}, salt="password-reset")
-            reset_url = url_for("auth.reset_password", token=token, _external=True)
-            try:
+        delivery_error = False
+        try:
+            user = db.session.scalar(db.select(User).where(User.email == email))
+            if user:
+                required_mail_settings = (
+                    "MAIL_SERVER",
+                    "MAIL_USERNAME",
+                    "MAIL_PASSWORD",
+                    "MAIL_DEFAULT_SENDER",
+                )
+                missing_mail_settings = [
+                    setting for setting in required_mail_settings if not current_app.config.get(setting)
+                ]
+                if missing_mail_settings:
+                    raise RuntimeError(
+                        "Password reset email is not configured; missing "
+                        + ", ".join(missing_mail_settings)
+                    )
+                serializer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
+                token = serializer.dumps({"user_id": user.id}, salt="password-reset")
+                reset_url = url_for("auth.reset_password", token=token, _external=True)
                 mail.send(
                     Message(
                         subject="Reset your Signal password",
@@ -792,11 +807,13 @@ def forgot_password():
                         ),
                     )
                 )
-            except Exception:
-                current_app.logger.exception("Password reset email delivery failed")
+        except Exception:
+            delivery_error = True
+            current_app.logger.exception("Password reset request could not be completed")
         return render_template(
             "auth/forgot_password.html",
             sent=True,
+            delivery_error=delivery_error,
         )
     return render_template("auth/forgot_password.html")
 
