@@ -928,7 +928,10 @@ def send_lead_email(lead_id: int):
     lead = db.one_or_404(db.select(Lead).where(Lead.id == lead_id, Lead.user_id == current_user.id))
     payload = request.get_json(silent=True) or {}
     recipient = (payload.get("email") or lead.contact_email or "").strip()
-    step = int(payload.get("step", 1))
+    try:
+        step = int(payload.get("step", 1))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Email step must be 1, 2, or 3."}), 400
     if step not in {1, 2, 3}:
         return jsonify({"error": "Email step must be 1, 2, or 3."}), 400
     next_step = (lead.outreach_step_sent or 0) + 1
@@ -936,22 +939,55 @@ def send_lead_email(lead_id: int):
         return jsonify({"error": f"Step {step} is not available. Send step {next_step} next."}), 409
     if not recipient or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", recipient):
         return jsonify({"error": "A valid public contact email is required."}), 400
-    if not current_app.config.get("MAIL_SERVER") or not current_app.config.get("MAIL_DEFAULT_SENDER"):
-        return jsonify({"error": "SMTP is not configured. Add MAIL_SERVER and MAIL_DEFAULT_SENDER to .env."}), 503
+    required_mail_settings = (
+        "MAIL_SERVER",
+        "MAIL_USERNAME",
+        "MAIL_PASSWORD",
+        "MAIL_DEFAULT_SENDER",
+    )
+    missing_mail_settings = [
+        setting for setting in required_mail_settings if not current_app.config.get(setting)
+    ]
+    if missing_mail_settings:
+        return jsonify({
+            "error": "SMTP is not configured. Missing: " + ", ".join(missing_mail_settings)
+        }), 503
 
     subject = payload.get("subject") or lead.pitch_subject or f"Quick {service_label(lead.service_type).lower()} note regarding {lead.business_name}"
     body = payload.get("body") or getattr(lead, f"outreach_step_{step}")
+    message = Message(subject=subject, recipients=[recipient], body=body)
+    mail_app = current_app._get_current_object()
+    if current_app.testing:
+        _deliver_lead_email(mail_app, lead_id, step, recipient, message)
+        return jsonify({"status": "sent", "step": step, "recipient": recipient})
+    Thread(
+        target=_deliver_lead_email,
+        args=(mail_app, lead_id, step, recipient, message),
+        daemon=True,
+    ).start()
+    return jsonify({"status": "queued", "step": step, "recipient": recipient}), 202
+
+
+def _deliver_lead_email(
+    app: Flask,
+    lead_id: int,
+    step: int,
+    recipient: str,
+    message: Message,
+) -> None:
     try:
-        mail.send(Message(subject=subject, recipients=[recipient], body=body))
-    except Exception as exc:
-        current_app.logger.exception("Email delivery failed for lead %s", lead_id)
-        return jsonify({"error": f"Email delivery failed: {exc}"}), 502
-    lead.outreach_step_sent = max(lead.outreach_step_sent or 0, step)
-    lead.last_email_sent_at = datetime.now(timezone.utc)
-    if step == 1:
-        lead.lead_status = "Contacted"
-    db.session.commit()
-    return jsonify({"status": "sent", "step": step, "recipient": recipient})
+        with app.app_context():
+            mail.send(message)
+            lead = db.session.get(Lead, lead_id)
+            if lead is None:
+                return
+            lead.outreach_step_sent = max(lead.outreach_step_sent or 0, step)
+            lead.last_email_sent_at = datetime.now(timezone.utc)
+            if step == 1:
+                lead.lead_status = "Contacted"
+            db.session.commit()
+    except Exception:
+        app.logger.exception("Email delivery failed for lead %s to %s", lead_id, recipient)
 
 
 def _run_search(app, task_id: str, query: str, user_id: int | None) -> None:
