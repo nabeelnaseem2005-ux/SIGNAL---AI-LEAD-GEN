@@ -55,17 +55,13 @@ class Config:
     MAIL_USE_SSL = os.getenv("MAIL_USE_SSL", "false").lower() == "true"
     MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
     MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
-<<<<<<< HEAD
-    MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", os.getenv("MAIL_USERNAME", ""))
-    RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-    RESEND_FROM_EMAIL = "onboarding@resend.dev"
-=======
     # Gmail rejects (or silently drops) messages where the "From" address does
     # not match the authenticated account, so MAIL_DEFAULT_SENDER is always
     # forced to match MAIL_USERNAME regardless of what MAIL_DEFAULT_SENDER is
     # set to in the environment.
     MAIL_DEFAULT_SENDER = MAIL_USERNAME
->>>>>>> 27470d1fb598a9b16c799d850641c25cdfb22f83
+    RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+    RESEND_FROM_EMAIL = "onboarding@resend.dev"
     PASSWORD_RESET_TOKEN_MAX_AGE = 60 * 60
     MAX_CONTENT_LENGTH = 2 * 1024 * 1024
 
@@ -874,7 +870,6 @@ def forgot_password():
             token = serializer.dumps({"user_id": user.id}, salt="password-reset")
             reset_url = url_for("auth.reset_password", token=token, _external=True)
             try:
-<<<<<<< HEAD
                 resend_api_key = current_app.config.get("RESEND_API_KEY", "")
                 if not resend_api_key:
                     raise RuntimeError("RESEND_API_KEY is not configured")
@@ -885,26 +880,18 @@ def forgot_password():
                         "to": [user.email],
                         "subject": "Reset your Signal password",
                         "text": (
-=======
-                send_email_async(
-                    Message(
-                        subject="Reset your Signal password",
-                        recipients=[user.email],
-                        body=(
->>>>>>> 27470d1fb598a9b16c799d850641c25cdfb22f83
                             "We received a request to reset your Signal password.\n\n"
                             f"Reset it here: {reset_url}\n\n"
                             "This link expires in one hour. If you did not request this, you can ignore this email."
                         ),
                     }
                 )
-<<<<<<< HEAD
             except Exception as exc:
-                current_app.logger.error("Password reset email delivery failed for %s: %s", user.email, exc)
-=======
-            except Exception:
-                current_app.logger.exception("Password reset email could not be queued")
->>>>>>> 27470d1fb598a9b16c799d850641c25cdfb22f83
+                current_app.logger.error(
+                    "Password reset email delivery failed for %s: %s",
+                    user.email,
+                    exc,
+                )
         return render_template(
             "auth/forgot_password.html",
             sent=True,
