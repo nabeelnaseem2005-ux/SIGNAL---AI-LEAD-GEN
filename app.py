@@ -61,6 +61,7 @@ class Config:
     MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
     MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
     MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", os.getenv("MAIL_USERNAME", ""))
+    MAIL_TIMEOUT = float(os.getenv("MAIL_TIMEOUT", "20"))
     PASSWORD_RESET_TOKEN_MAX_AGE = 60 * 60
     MAX_CONTENT_LENGTH = 2 * 1024 * 1024
 
@@ -73,6 +74,28 @@ class TestingConfig(Config):
 
 class DevelopmentConfig(Config):
     DEBUG = True
+
+
+def _send_smtp_message(app: Flask, message: Message) -> None:
+    """Send one message with a bounded network timeout."""
+    host = app.config["MAIL_SERVER"]
+    port = app.config["MAIL_PORT"]
+    timeout = app.config.get("MAIL_TIMEOUT", 20)
+    sender = message.sender or app.config["MAIL_DEFAULT_SENDER"]
+    connection = None
+    try:
+        if app.config.get("MAIL_USE_SSL"):
+            connection = smtplib.SMTP_SSL(host, port, timeout=timeout)
+        else:
+            connection = smtplib.SMTP(host, port, timeout=timeout)
+            if app.config.get("MAIL_USE_TLS"):
+                connection.starttls()
+        if app.config.get("MAIL_USERNAME") and app.config.get("MAIL_PASSWORD"):
+            connection.login(app.config["MAIL_USERNAME"], app.config["MAIL_PASSWORD"])
+        connection.sendmail(sender, message.recipients, message.as_string())
+    finally:
+        if connection is not None:
+            connection.quit()
 
 
 def get_config() -> type[Config]:
@@ -788,7 +811,8 @@ def forgot_password():
             token = serializer.dumps({"user_id": user.id}, salt="password-reset")
             reset_url = url_for("auth.reset_password", token=token, _external=True)
             try:
-                mail.send(
+                _send_smtp_message(
+                    current_app._get_current_object(),
                     Message(
                         subject="Reset your Signal password",
                         recipients=[user.email],
@@ -913,7 +937,7 @@ def send_lead_email(lead_id: int):
     subject = payload.get("subject") or lead.pitch_subject or f"Quick {service_label(lead.service_type).lower()} note regarding {lead.business_name}"
     body = payload.get("body") or getattr(lead, f"outreach_step_{step}")
     try:
-        mail.send(Message(subject=subject, recipients=[recipient], body=body))
+        _send_smtp_message(current_app._get_current_object(), Message(subject=subject, recipients=[recipient], body=body))
     except Exception as exc:
         current_app.logger.exception("Email delivery failed for lead %s", lead_id)
         return jsonify({"error": f"Email delivery failed: {exc}"}), 502
