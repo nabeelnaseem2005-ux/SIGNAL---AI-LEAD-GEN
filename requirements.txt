@@ -8,3 +8,4 @@ beautifulsoup4>=4.12,<5
 google-search-results>=2.4,<3
 python-dotenv>=1.0,<2
 requests>=2.31,<3
+resend>=2.0,<3

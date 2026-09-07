@@ -4,7 +4,6 @@ import gzip
 import json
 import os
 import re
-import smtplib
 import time
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,6 +14,7 @@ from uuid import uuid4
 from collections.abc import Callable
 
 import requests
+import resend
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask, Blueprint, Response, current_app, jsonify, redirect, render_template, request, session, url_for
@@ -54,6 +54,8 @@ class Config:
     MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
     MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
     MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", os.getenv("MAIL_USERNAME", ""))
+    RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+    RESEND_FROM_EMAIL = "onboarding@resend.dev"
     PASSWORD_RESET_TOKEN_MAX_AGE = 60 * 60
     MAX_CONTENT_LENGTH = 2 * 1024 * 1024
 
@@ -781,19 +783,24 @@ def forgot_password():
             token = serializer.dumps({"user_id": user.id}, salt="password-reset")
             reset_url = url_for("auth.reset_password", token=token, _external=True)
             try:
-                mail.send(
-                    Message(
-                        subject="Reset your Signal password",
-                        recipients=[user.email],
-                        body=(
+                resend_api_key = current_app.config.get("RESEND_API_KEY", "")
+                if not resend_api_key:
+                    raise RuntimeError("RESEND_API_KEY is not configured")
+                resend.api_key = resend_api_key
+                resend.Emails.send(
+                    {
+                        "from": current_app.config.get("RESEND_FROM_EMAIL", "onboarding@resend.dev"),
+                        "to": [user.email],
+                        "subject": "Reset your Signal password",
+                        "text": (
                             "We received a request to reset your Signal password.\n\n"
                             f"Reset it here: {reset_url}\n\n"
                             "This link expires in one hour. If you did not request this, you can ignore this email."
                         ),
-                    )
+                    }
                 )
-            except Exception:
-                current_app.logger.exception("Password reset email delivery failed")
+            except Exception as exc:
+                current_app.logger.error("Password reset email delivery failed for %s: %s", user.email, exc)
         return render_template(
             "auth/forgot_password.html",
             sent=True,
