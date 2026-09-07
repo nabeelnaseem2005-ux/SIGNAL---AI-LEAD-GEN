@@ -5,9 +5,11 @@ import json
 import os
 import re
 import time
+import traceback
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
+from queue import Queue
 from threading import Lock, Thread
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -53,9 +55,17 @@ class Config:
     MAIL_USE_SSL = os.getenv("MAIL_USE_SSL", "false").lower() == "true"
     MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
     MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
+<<<<<<< HEAD
     MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", os.getenv("MAIL_USERNAME", ""))
     RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
     RESEND_FROM_EMAIL = "onboarding@resend.dev"
+=======
+    # Gmail rejects (or silently drops) messages where the "From" address does
+    # not match the authenticated account, so MAIL_DEFAULT_SENDER is always
+    # forced to match MAIL_USERNAME regardless of what MAIL_DEFAULT_SENDER is
+    # set to in the environment.
+    MAIL_DEFAULT_SENDER = MAIL_USERNAME
+>>>>>>> 27470d1fb598a9b16c799d850641c25cdfb22f83
     PASSWORD_RESET_TOKEN_MAX_AGE = 60 * 60
     MAX_CONTENT_LENGTH = 2 * 1024 * 1024
 
@@ -712,6 +722,87 @@ _search_cache: dict[str, tuple[float, list[dict]]] = {}
 _search_cache_lock = Lock()
 _ALLOWED_STATUSES = {"New", "Contacted", "Closed"}
 
+# Background mail queue: emails are enqueued here and delivered by a
+# long-running worker thread so request handlers never block on SMTP I/O
+# (Gmail's SMTP handshake can hang well past gunicorn's worker timeout).
+_mail_queue: "Queue[Message | None]" = Queue()
+_mail_worker_thread: Thread | None = None
+_mail_worker_lock = Lock()
+
+
+def _mail_worker(app) -> None:
+    while True:
+        message = _mail_queue.get()
+        try:
+            if message is None:
+                return
+            recipients = getattr(message, "recipients", None)
+            sender = getattr(message, "sender", None)
+            subject = getattr(message, "subject", None)
+            try:
+                with app.app_context():
+                    configured_sender = current_app.config.get("MAIL_DEFAULT_SENDER")
+                    configured_username = current_app.config.get("MAIL_USERNAME")
+                    app.logger.info(
+                        "Sending email | to=%s | sender=%s | configured_default_sender=%s | "
+                        "configured_username=%s | subject=%s",
+                        recipients,
+                        sender or configured_sender,
+                        configured_sender,
+                        configured_username,
+                        subject,
+                    )
+                    mail.send(message)
+                    app.logger.info(
+                        "Email sent successfully | to=%s | sender=%s | subject=%s",
+                        recipients,
+                        sender or configured_sender,
+                        subject,
+                    )
+            except smtplib.SMTPAuthenticationError as exc:
+                app.logger.error(
+                    "SMTP authentication failed while sending to %s from %s (subject=%s): %s\n%s",
+                    recipients,
+                    sender,
+                    subject,
+                    exc,
+                    traceback.format_exc(),
+                )
+            except smtplib.SMTPException as exc:
+                app.logger.error(
+                    "SMTP error while sending to %s from %s (subject=%s): %s\n%s",
+                    recipients,
+                    sender,
+                    subject,
+                    exc,
+                    traceback.format_exc(),
+                )
+            except Exception as exc:
+                app.logger.error(
+                    "Async email delivery failed for %s from %s (subject=%s): %s\n%s",
+                    recipients,
+                    sender,
+                    subject,
+                    exc,
+                    traceback.format_exc(),
+                )
+        finally:
+            _mail_queue.task_done()
+
+
+def start_mail_worker(app) -> None:
+    """Start the singleton background thread that drains the mail queue."""
+    global _mail_worker_thread
+    with _mail_worker_lock:
+        if _mail_worker_thread is None or not _mail_worker_thread.is_alive():
+            _mail_worker_thread = Thread(target=_mail_worker, args=(app,), daemon=True, name="mail-worker")
+            _mail_worker_thread.start()
+
+
+def send_email_async(message: Message) -> None:
+    """Queue an email for delivery on the background mail worker thread."""
+    _mail_queue.put(message)
+
 
 def _get_cached_search(cache_key: str) -> list[dict] | None:
     with _search_cache_lock:
@@ -783,6 +874,7 @@ def forgot_password():
             token = serializer.dumps({"user_id": user.id}, salt="password-reset")
             reset_url = url_for("auth.reset_password", token=token, _external=True)
             try:
+<<<<<<< HEAD
                 resend_api_key = current_app.config.get("RESEND_API_KEY", "")
                 if not resend_api_key:
                     raise RuntimeError("RESEND_API_KEY is not configured")
@@ -793,14 +885,26 @@ def forgot_password():
                         "to": [user.email],
                         "subject": "Reset your Signal password",
                         "text": (
+=======
+                send_email_async(
+                    Message(
+                        subject="Reset your Signal password",
+                        recipients=[user.email],
+                        body=(
+>>>>>>> 27470d1fb598a9b16c799d850641c25cdfb22f83
                             "We received a request to reset your Signal password.\n\n"
                             f"Reset it here: {reset_url}\n\n"
                             "This link expires in one hour. If you did not request this, you can ignore this email."
                         ),
                     }
                 )
+<<<<<<< HEAD
             except Exception as exc:
                 current_app.logger.error("Password reset email delivery failed for %s: %s", user.email, exc)
+=======
+            except Exception:
+                current_app.logger.exception("Password reset email could not be queued")
+>>>>>>> 27470d1fb598a9b16c799d850641c25cdfb22f83
         return render_template(
             "auth/forgot_password.html",
             sent=True,
@@ -913,16 +1017,16 @@ def send_lead_email(lead_id: int):
     subject = payload.get("subject") or lead.pitch_subject or f"Quick {service_label(lead.service_type).lower()} note regarding {lead.business_name}"
     body = payload.get("body") or getattr(lead, f"outreach_step_{step}")
     try:
-        mail.send(Message(subject=subject, recipients=[recipient], body=body))
+        send_email_async(Message(subject=subject, recipients=[recipient], body=body))
     except Exception as exc:
-        current_app.logger.exception("Email delivery failed for lead %s", lead_id)
-        return jsonify({"error": f"Email delivery failed: {exc}"}), 502
+        current_app.logger.exception("Email could not be queued for lead %s", lead_id)
+        return jsonify({"error": f"Email could not be queued: {exc}"}), 502
     lead.outreach_step_sent = max(lead.outreach_step_sent or 0, step)
     lead.last_email_sent_at = datetime.now(timezone.utc)
     if step == 1:
         lead.lead_status = "Contacted"
     db.session.commit()
-    return jsonify({"status": "sent", "step": step, "recipient": recipient})
+    return jsonify({"status": "queued", "step": step, "recipient": recipient})
 
 
 def _run_search(app, task_id: str, query: str, user_id: int | None) -> None:
@@ -1158,6 +1262,8 @@ def create_app(config_class=None) -> Flask:
         db.create_all()
         _ensure_legacy_columns()
         _refresh_legacy_outreach()
+
+    start_mail_worker(app)
 
     @app.after_request
     def compress_response(response):
