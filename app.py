@@ -4,6 +4,7 @@ import gzip
 import json
 import os
 import re
+import smtplib
 import time
 import traceback
 from datetime import datetime, timezone
