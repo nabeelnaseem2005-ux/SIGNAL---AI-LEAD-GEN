@@ -22,7 +22,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask, Blueprint, Response, current_app, jsonify, redirect, render_template, request, session, url_for
 from flask_login import LoginManager, UserMixin, current_user, login_required, login_user, logout_user
-from flask_mail import Mail, Message
+from flask_mail import Connection, Mail, Message
 from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
 from serpapi import GoogleSearch
@@ -728,6 +728,36 @@ _mail_worker_thread: Thread | None = None
 _mail_worker_lock = Lock()
 
 
+def _send_smtp_message(app, message: Message) -> None:
+    """Send outreach mail with a socket timeout that Flask-Mail does not expose."""
+    timeout = app.config.get("MAIL_TIMEOUT", 20.0)
+    if app.config.get("MAIL_USE_SSL"):
+        connection = smtplib.SMTP_SSL(
+            app.config["MAIL_SERVER"],
+            app.config["MAIL_PORT"],
+            timeout=timeout,
+        )
+    else:
+        connection = smtplib.SMTP(
+            app.config["MAIL_SERVER"],
+            app.config["MAIL_PORT"],
+            timeout=timeout,
+        )
+    mail_connection = Connection(app.extensions["mail"])
+    mail_connection.host = connection
+    try:
+        if app.config.get("MAIL_USE_TLS"):
+            connection.starttls()
+        if app.config.get("MAIL_USERNAME") and app.config.get("MAIL_PASSWORD"):
+            connection.login(app.config["MAIL_USERNAME"], app.config["MAIL_PASSWORD"])
+        mail_connection.send(message)
+    finally:
+        try:
+            connection.quit()
+        except smtplib.SMTPException:
+            connection.close()
+
+
 def _mail_worker(app) -> None:
     while True:
         message = _mail_queue.get()
@@ -751,7 +781,7 @@ def _mail_worker(app) -> None:
                         subject,
                     )
                     app.logger.info("Starting Gmail SMTP delivery | host=%s | port=%s", current_app.config.get("MAIL_SERVER"), current_app.config.get("MAIL_PORT"))
-                    mail.send(message)
+                    _send_smtp_message(app, message)
                     app.logger.info(
                         "Email sent successfully | to=%s | sender=%s | subject=%s",
                         recipients,
