@@ -54,6 +54,7 @@ class Config:
     MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
     MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
     MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", os.getenv("MAIL_USERNAME", ""))
+    MAIL_TIMEOUT = int(os.getenv("MAIL_TIMEOUT", "10"))
     PASSWORD_RESET_TOKEN_MAX_AGE = 60 * 60
     MAX_CONTENT_LENGTH = 2 * 1024 * 1024
 
@@ -796,17 +797,20 @@ def forgot_password():
                 serializer = URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
                 token = serializer.dumps({"user_id": user.id}, salt="password-reset")
                 reset_url = url_for("auth.reset_password", token=token, _external=True)
-                mail.send(
-                    Message(
-                        subject="Reset your Signal password",
-                        recipients=[user.email],
-                        body=(
-                            "We received a request to reset your Signal password.\n\n"
-                            f"Reset it here: {reset_url}\n\n"
-                            "This link expires in one hour. If you did not request this, you can ignore this email."
-                        ),
-                    )
+                message = Message(
+                    subject="Reset your Signal password",
+                    recipients=[user.email],
+                    body=(
+                        "We received a request to reset your Signal password.\n\n"
+                        f"Reset it here: {reset_url}\n\n"
+                        "This link expires in one hour. If you did not request this, you can ignore this email."
+                    ),
                 )
+                mail_app = current_app._get_current_object()
+                if current_app.testing:
+                    mail.send(message)
+                else:
+                    Thread(target=_send_password_reset_email, args=(mail_app, message), daemon=True).start()
         except Exception:
             delivery_error = True
             current_app.logger.exception("Password reset request could not be completed")
@@ -816,6 +820,14 @@ def forgot_password():
             delivery_error=delivery_error,
         )
     return render_template("auth/forgot_password.html")
+
+
+def _send_password_reset_email(app: Flask, message: Message) -> None:
+    try:
+        with app.app_context():
+            mail.send(message)
+    except Exception:
+        app.logger.exception("Password reset email delivery failed")
 
 
 @auth_bp.route("/reset-password/<token>", methods=["GET", "POST"])
