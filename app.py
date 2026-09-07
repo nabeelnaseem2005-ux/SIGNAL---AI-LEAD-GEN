@@ -54,6 +54,7 @@ class Config:
     MAIL_PORT = int(os.getenv("MAIL_PORT", "587"))
     MAIL_USE_TLS = os.getenv("MAIL_USE_TLS", "true").lower() == "true"
     MAIL_USE_SSL = os.getenv("MAIL_USE_SSL", "false").lower() == "true"
+    MAIL_TIMEOUT = float(os.getenv("MAIL_TIMEOUT", "20"))
     MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
     MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
     # Gmail rejects (or silently drops) messages where the "From" address does
@@ -749,6 +750,7 @@ def _mail_worker(app) -> None:
                         configured_username,
                         subject,
                     )
+                    app.logger.info("Starting Gmail SMTP delivery | host=%s | port=%s", current_app.config.get("MAIL_SERVER"), current_app.config.get("MAIL_PORT"))
                     mail.send(message)
                     app.logger.info(
                         "Email sent successfully | to=%s | sender=%s | subject=%s",
